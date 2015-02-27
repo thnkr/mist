@@ -1,0 +1,209 @@
+#!/usr/bin/env ruby
+
+require 'csv'
+require 'json'
+require 'thor'
+require 'fog'
+
+class Mist < Thor
+
+  desc "config SERVICE", "Creates configuration file for new cloud compute provider in ~/.mist/TITLE"
+  def config(service)
+
+    case service
+      when 'aws','AWS','Amazon Web Services'
+        @config = $client.get_config
+
+        say("MIST => Amazon Web Services EC2 Setup")
+        public_key = ask("Public Key:")
+        private_key = ask("Secret Key:")
+
+        @config[:services] = {
+            :aws => {
+                :public_key => public_key,
+                :private_key => private_key
+            }
+        }
+
+        $client.set_config @config
+      else
+        puts "MIST: The service schema was not recognized."
+    end
+
+  end
+
+  desc "boot", "Default cheapest machine of given service"
+
+  def boot(provider = 'aws')
+
+    case provider
+
+      when 'aws','AWS'
+        @config = $client.get_config
+
+        if $provider
+          provider = $provider
+        else
+          provider = Fog::Compute.new(:provider => 'AWS',
+                                      :aws_access_key_id => @config[:services][:aws][:public_key],
+                                      :aws_secret_access_key => @config[:services][:aws][:private_key])
+        end
+
+        # Check to see if there is already a MIST server running. If so, connect to it.
+        server = provider.servers.find { |server| server.key_name == 'fog_default' && server.state == 'running' }
+        if server
+          puts "MIST: #{Time.now} => Found cloud machine at: #{server.public_ip_address}"
+          exec("ssh -i ~/.ssh/id_rsa ubuntu@#{server.public_ip_address}")
+        else
+
+          puts "MIST: #{Time.now} => Creating new cloud machine..."
+
+          t1 = Thread.new {
+            server = provider.servers.bootstrap(:private_key_path => '~/.ssh/id_rsa',
+                                                :public_key_path => '~/.ssh/id_rsa.pub',
+                                                :username => 'ubuntu',
+                                                :image_id => 'ami-2ef1b646')
+          }
+
+          t2 = Thread.new {
+            i = 0
+            rows = ['.','.','.']
+            loop do
+              sleep 0.1
+              print "\rMIST: #{Time.now} => Deploying machine #{rows.join}"
+              if rows.length > 3
+                rows = ['.']
+              else
+                rows << '.'
+              end
+
+            end
+          }
+
+          t1.join
+          t2.kill
+
+          puts "\nMIST: #{Time.now} => Success! Machine created at IP: #{server.public_ip_address}"
+
+
+          # t2 = Thread.new {
+          #   i = 0
+          #   rows = ['|','-','_','-']
+          #   loop do
+          #     sleep 0.2
+          #     print "\rMIST: #{Time.now} => Installing GoodData Ruby SDK... #{rows[i]}"
+          #     i += 1
+          #     if i > 3
+          #       i = 0
+          #     end
+          #
+          #   end
+          # }
+
+          #system("ssh-keyscan -H #{server.public_ip_address} >> ~/.ssh/known_hosts")
+          #system("ssh-keyscan -H #{server.dns_name} >> ~/.ssh/known_hosts")
+
+          # puts "MIST: #{Time.now} => Installing JRuby on #{server.public_ip_address}..."
+          # exec("ssh -i ~/.ssh/id_rsa ubuntu@#{server.public_ip_address} 'yes | sudo apt-get update; yes | rvm install jruby; rvm --default use jruby; exit'")
+
+          exec("ssh -t -i ~/.ssh/id_rsa ubuntu@#{server.public_ip_address}")
+
+        end
+
+      else
+        puts "MIST: Unable to create machine with given provider: \"#{provider}\""
+    end
+
+  end
+
+  default_task :boot
+
+  desc "kill", "Destroys default cloud server."
+
+  def kill
+
+    if $provider
+      provider = $provider
+    else
+      provider = Fog::Compute.new(:provider => 'AWS',
+                                  :aws_access_key_id => @config[:services][:aws][:public_key],
+                                  :aws_secret_access_key => @config[:services][:aws][:private_key])
+
+    end
+
+    puts "MIST: #{Time.now} => Searching for active machines..."
+    provider.servers.map { |server|
+
+      if server.key_name == 'fog_default' && server.state == 'running'
+        say("MIST: #{Time.now} => Found running server: #{server.public_ip_address}\n")
+        res = ask("Terminate (y/n)?")
+        if res == 'y' || res == 'yes' || res == ''
+          server.destroy
+        end
+      end
+    }
+
+  end
+
+  no_commands {
+
+    def setup
+
+      home = Dir.home
+      @config_file_path = home+"/.mist"
+
+      if File.exists? (@config_file_path)
+        @config = JSON.parse(IO.read(@config_file_path), :symbolize_names => true)
+      else
+
+        @config = Hash.new
+
+        @config[:profile] = {
+            :global_id => (0...50).map { ('a'..'z').to_a[rand(26)] }.join,
+            :installation => Time.now.to_s,
+            :config_file_version => 1
+        }
+
+        @config[:services] = {}
+
+        File.open(@config_file_path,"w") do |f|
+          f.write(@config.to_json)
+        end
+
+      end
+    end
+
+    def get_config
+      @config
+    end
+
+    def set_config changes
+      puts @config.merge(changes)
+      File.open(@config_file_path, "w") do |f|
+        f.write(@config.to_json)
+      end
+    end
+
+  }
+
+end
+
+$client = Mist.new
+$client.setup
+
+config = $client.get_config
+if config[:services] != "" || config[:services] != [] || config[:services] != {}
+  $provider = Fog::Compute.new(:provider => 'AWS',
+                               :aws_access_key_id => config[:services][:aws][:public_key],
+                               :aws_secret_access_key => config[:services][:aws][:private_key])
+end
+
+if ARGV.empty?
+  # Perform the default, it doesn't have to be a Thor task
+  Mist.new.boot
+else
+  # Start Thor as usual
+  Mist.start
+end
+
+
