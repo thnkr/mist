@@ -192,7 +192,7 @@ $client = Mist.new
 $client.setup
 
 config = $client.get_config
-if config[:services] != "" || config[:services] != [] || config[:services] != {}
+if config[:services] != {}
   $provider = Fog::Compute.new(:provider => 'AWS',
                                :aws_access_key_id => config[:services][:aws][:public_key],
                                :aws_secret_access_key => config[:services][:aws][:private_key])
